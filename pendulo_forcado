@@ -1,0 +1,128 @@
+import numpy as np
+import matplotlib.pyplot as plt
+from scipy.integrate import solve_ivp
+from scipy.optimize import curve_fit
+from deap import algorithms, base, creator, tools
+
+# ===========================================================
+# CONFIGURAÇÃO INICIAL: Parâmetros reais e intervalo de tempo
+# ===========================================================
+g, l = 9.81, 1.0  # Constantes físicas
+# Parâmetros reais (objetivo a ser estimado)
+m_real, c_real, F_real = 1.5, 0.5, 0.5
+# Novo intervalo de tempo para melhor visualizar o efeito do amortecimento
+t_span = [0, 20]
+num_points = 200
+t_data = np.linspace(t_span[0], t_span[1], num_points)
+
+# ===========================================================
+# Definição do pêndulo amortecido forçado
+# ===========================================================
+def pendulo_forcado(t, y, m, c, F):
+    theta, omega = y
+    return [omega, -(g/l)*np.sin(theta) - (c/m)*omega + (F/m)*np.cos(2*t)]""
+
+# ===========================================================
+# Função de simulação do pêndulo
+# ===========================================================
+def simulate_pendulum(m, c, F, t_eval=t_data, y0=[0.1, 0], t_span=t_span):
+    """
+    Simula o pêndulo amortecido forçado e retorna o vetor de ângulos.
+    Para acelerar a simulação, usamos tolerâncias relaxadas e não usamos dense_output.
+    """
+    sol = solve_ivp(
+        pendulo_forcado, 
+        t_span, 
+        y0, 
+        args=(m, c, F), 
+        t_eval=t_eval, 
+        method='RK45', 
+        rtol=1e-4, 
+        atol=1e-6
+    )
+    return sol.y[0]
+
+# Geração dos dados "reais" com ruído (1%)
+theta_real = simulate_pendulum(m_real, c_real, F_real) + np.random.normal(0, 0.01, len(t_data))
+
+# ===========================================================
+# Otimização via Algoritmo Genético (DEAP)
+# ===========================================================
+creator.create("FitnessMin", base.Fitness, weights=(-1.0,))
+creator.create("Individual", list, fitness=creator.FitnessMin)
+
+toolbox = base.Toolbox()
+# Geração dos atributos dentro de intervalos físicos plausíveis
+toolbox.register("attr_m", np.random.uniform, 1.0, 2.0)
+toolbox.register("attr_c", np.random.uniform, 0.1, 0.5)
+toolbox.register("attr_F", np.random.uniform, 0.5, 1.2)
+toolbox.register("individual", tools.initCycle, creator.Individual,
+                 (toolbox.attr_m, toolbox.attr_c, toolbox.attr_F))
+toolbox.register("population", tools.initRepeat, list, toolbox.individual)
+
+def fitness(individual):
+    m, c, F = individual
+    # Penalização caso os parâmetros saiam dos intervalos esperados
+    penalty = 0
+    if not (1.0 <= m <= 2.0): penalty += 10 * abs(m - 1.5)
+    if not (0.1 <= c <= 0.5): penalty += 10 * abs(c - 0.3)
+    if not (0.5 <= F <= 1.2): penalty += 10 * abs(F - 0.8)
+    
+    try:
+        theta_pred = simulate_pendulum(m, c, F)
+        error = np.mean((theta_pred - theta_real) ** 2)
+        return error + penalty,
+    except Exception:
+        return 1e6,
+    
+toolbox.register("evaluate", fitness)
+toolbox.register("mate", tools.cxBlend, alpha=0.5)
+toolbox.register("mutate", tools.mutGaussian, mu=0, sigma=0.1, indpb=0.2)
+toolbox.register("select", tools.selTournament, tournsize=3)
+
+# Execução do Algoritmo Genético
+pop = toolbox.population(n=150)
+result = algorithms.eaSimple(pop, toolbox, cxpb=0.7, mutpb=0.2, ngen=200, verbose=True)
+best_ag = tools.selBest(pop, k=1)[0]
+
+# ===========================================================
+# Ajuste via Mínimos Quadrados
+# ===========================================================
+def modelo_para_ajuste(t, m, c, F):
+    return simulate_pendulum(m, c, F, t_eval=t)
+
+popt, pcov = curve_fit(
+    modelo_para_ajuste, 
+    t_data, 
+    theta_real,
+    p0=[1.5, 0.3, 0.8], 
+    bounds=([1.0, 0.1, 0.5], [2.0, 0.5, 1.2])
+)
+
+# ===========================================================
+# Visualização dos Resultados
+# ===========================================================
+theta_ag = simulate_pendulum(*best_ag)
+theta_lsq = simulate_pendulum(*popt)
+
+plt.figure(figsize=(12, 6))
+plt.plot(t_data, theta_real, 'k-', linewidth=2, 
+         label=f"Dados Reais (m={m_real}, c={c_real}, F={F_real})")
+plt.plot(t_data, theta_ag, 'r--', linewidth=1.5,
+         label=f"AG: m={best_ag[0]:.2f}, c={best_ag[1]:.2f}, F={best_ag[2]:.2f}")
+plt.plot(t_data, theta_lsq, 'b:', linewidth=1.5,
+         label=f"Mínimos Quadrados: m={popt[0]:.2f}, c={popt[1]:.2f}, F={popt[2]:.2f}")
+plt.xlabel("Tempo (s)", fontsize=12)
+plt.ylabel("Ângulo (rad)", fontsize=12)
+plt.title("Comparação: AG vs Mínimos Quadrados - Pêndulo Amortecido Forçado", fontsize=14)
+plt.legend(fontsize=10, loc='upper right')
+plt.grid(True, alpha=0.3)
+plt.tight_layout()
+plt.show()
+
+print("\n=== RESULTADOS FINAIS ===")
+print(f"{'Método':<20} | {'Massa (m)':<10} | {'Amortecimento (c)':<18} | {'Forçamento (F)':<14}")
+print("-" * 70)
+print(f"{'Dados Reais':<20} | {m_real:<10.2f} | {c_real:<18.2f} | {F_real:<14.2f}")
+print(f"{'Algoritmo Genético':<20} | {best_ag[0]:<10.2f} | {best_ag[1]:<18.2f} | {best_ag[2]:<14.2f}")
+print(f"{'Mínimos Quadrados':<20} | {popt[0]:<10.2f} | {popt[1]:<18.2f} | {popt[2]:<14.2f}")
