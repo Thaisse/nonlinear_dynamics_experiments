@@ -1,0 +1,97 @@
+import numpy as np
+from scipy.integrate import solve_ivp
+from scipy.optimize import curve_fit
+from deap import algorithms, base, creator, tools
+import matplotlib.pyplot as plt
+
+# =============================================
+# 1. Geração de Dados Reais (Simulados)
+# =============================================
+beta_real, gamma_real = 0.3, 0.1  # Parâmetros reais
+N = 1000  # População total
+I0, R0 = 10, 0  # Infectados e recuperados iniciais
+S0 = N - I0 - R0
+t_data = np.linspace(0, 100, 100)  # 100 dias
+
+def modelo_sir(t, y, beta, gamma):
+    S, I, R = y
+    dSdt = -beta * S * I / N
+    dIdt = beta * S * I / N - gamma * I
+    dRdt = gamma * I
+    return [dSdt, dIdt, dRdt]
+
+sol_real = solve_ivp(modelo_sir, [0, 100], [S0, I0, R0], 
+                    args=(beta_real, gamma_real), t_eval=t_data, 
+                    method='RK45', dense_output=True)
+I_real = sol_real.sol(t_data)[1] + np.random.normal(0, 5, len(t_data))  # Ruído de 5%
+
+# =============================================
+# 2. Configuração do Algoritmo Genético
+# =============================================
+creator.create("FitnessMin", base.Fitness, weights=(-1.0,))
+creator.create("Individual", list, fitness=creator.FitnessMin)
+
+toolbox = base.Toolbox()
+toolbox.register("attr_beta", np.random.uniform, 0.1, 0.5)
+toolbox.register("attr_gamma", np.random.uniform, 0.01, 0.3)
+toolbox.register("individual", tools.initCycle, creator.Individual, 
+                 (toolbox.attr_beta, toolbox.attr_gamma), n=1)
+toolbox.register("population", tools.initRepeat, list, toolbox.individual)
+
+def fitness(individual):
+    beta, gamma = individual
+    penalty = 0
+    if not (0.1 <= beta <= 0.5): penalty += 10 * abs(beta - 0.3)
+    if not (0.01 <= gamma <= 0.3): penalty += 10 * abs(gamma - 0.1)
+    
+    try:
+        sol = solve_ivp(modelo_sir, [0, 100], [S0, I0, R0], args=(beta, gamma),
+                       t_eval=t_data, method='RK45', dense_output=True)
+        I_pred = sol.sol(t_data)[1]
+        return np.mean((I_pred - I_real)**2) + penalty,
+    except:
+        return 1e6,
+
+# Operadores genéticos CORRIGIDOS (parênteses fechados corretamente)
+toolbox.register("evaluate", fitness)
+toolbox.register("mate", tools.cxBlend, alpha=0.5)  # Parêntese fechado aqui
+toolbox.register("mutate", tools.mutGaussian, mu=0, sigma=0.05, indpb=0.2)
+toolbox.register("select", tools.selTournament, tournsize=3)
+
+# =============================================
+# 3. Execução e Resultados
+# =============================================
+pop = toolbox.population(n=100)
+result = algorithms.eaSimple(pop, toolbox, cxpb=0.7, mutpb=0.2, ngen=150, verbose=True)
+best_ag = tools.selBest(pop, k=1)[0]
+
+# Mínimos quadrados para comparação
+def modelo_para_ajuste(t, beta, gamma):
+    sol = solve_ivp(modelo_sir, [0, 100], [S0, I0, R0], args=(beta, gamma),
+                   t_eval=t, method='RK45', dense_output=True)
+    return sol.sol(t)[1]
+
+popt, _ = curve_fit(modelo_para_ajuste, t_data, I_real, p0=[0.3, 0.1], 
+                   bounds=([0.1, 0.01], [0.5, 0.3]))
+
+# Visualização
+plt.figure(figsize=(12, 6))
+plt.scatter(t_data, I_real, color='k', s=20, label="Dados Reais", alpha=0.6)
+plt.plot(t_data, solve_ivp(modelo_sir, [0, 100], [S0, I0, R0], 
+                          args=tuple(best_ag), t_eval=t_data).y[1], 
+         'r--', label=f"AG: β={best_ag[0]:.3f}, γ={best_ag[1]:.3f}")
+plt.plot(t_data, solve_ivp(modelo_sir, [0, 100], [S0, I0, R0], 
+                          args=tuple(popt), t_eval=t_data).y[1], 
+         'b:', label=f"Mínimos Quadrados: β={popt[0]:.3f}, γ={popt[1]:.3f}")
+plt.xlabel("Tempo (dias)")
+plt.ylabel("Infectados (I)")
+plt.legend()
+plt.grid(True, alpha=0.3)
+plt.show()
+
+print("\n=== Resultados ===")
+print(f"| {'Método':<20} | {'β':<8} | {'γ':<8} |")
+print("|----------------------|---------|---------|")
+print(f"| {'Dados Reais':<20} | {beta_real:<8.3f} | {gamma_real:<8.3f} |")
+print(f"| {'Algoritmo Genético':<20} | {best_ag[0]:<8.3f} | {best_ag[1]:<8.3f} |")
+print(f"| {'Mínimos Quadrados':<20} | {popt[0]:<8.3f} | {popt[1]:<8.3f} |")
